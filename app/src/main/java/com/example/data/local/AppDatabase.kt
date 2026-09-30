@@ -1,0 +1,39 @@
+package com.example.data.local
+
+import android.content.Context
+import androidx.room.Database
+import androidx.room.Room
+import androidx.room.RoomDatabase
+
+@Database(
+    entities = [
+        UserEntity::class,
+        ConversationEntity::class,
+        MessageEntity::class
+    ],
+    version = 3,
+    exportSchema = false
+)
+abstract class AppDatabase : RoomDatabase() {
+    abstract fun userDao(): UserDao
+    abstract fun conversationDao(): ConversationDao
+    abstract fun messageDao(): MessageDao
+
+    companion object {
+        @Volatile
+        private var instance: AppDatabase? = null
+
+        fun getInstance(context: Context): AppDatabase {
+            return instance ?: synchronized(this) {
+                instance ?: Room.databaseBuilder(
+                    context.applicationContext,
+                    AppDatabase::class.java,
+                    "quick_chat_db"
+                )
+                    .fallbackToDestructiveMigration()
+                    .build()
+                    .also { instance = it }
+            }
+        }
+    }
+}

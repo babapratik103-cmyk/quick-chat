@@ -1,0 +1,8 @@
+{
+  "name": "Remix Quick Chat",
+  "description": "Privacy-focused encrypted messaging app based on store-and-forward with ACK-based deletion.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
