@@ -25,7 +25,9 @@ interface ChatRepository {
         password: String
     ): Result<User>
 
-    // Normal clean logout returning to login screen
+    // Session management
+    suspend fun restoreSession(): Result<User?>
+    suspend fun refreshSession(): Result<User?>
     suspend fun logout(): Result<Unit>
 
     suspend fun updateProfile(name: String, avatarColorHex: String): Result<User>

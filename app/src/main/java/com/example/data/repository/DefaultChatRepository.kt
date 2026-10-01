@@ -3,13 +3,19 @@ package com.example.data.repository
 import android.content.Context
 import android.database.sqlite.SQLiteConstraintException
 import com.example.data.local.AppDatabase
+import com.example.data.local.AuthTokenStore
 import com.example.data.local.ConversationEntity
 import com.example.data.local.MessageEntity
+import com.example.data.local.PrivateKeyStore
 import com.example.data.local.UserEntity
 import com.example.data.model.Conversation
 import com.example.data.model.Message
 import com.example.data.model.MessageDeliveryStatus
 import com.example.data.model.User
+import com.example.data.remote.SupabaseRestService
+import com.example.data.remote.SupabaseConfig
+import com.example.data.remote.SupabaseProfileDto
+import com.example.data.remote.RefreshTokenResponse
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -23,7 +29,8 @@ import java.util.UUID
 
 class DefaultChatRepository(
     private val context: Context,
-    private val database: AppDatabase = AppDatabase.getInstance(context)
+    private val database: AppDatabase = AppDatabase.getInstance(context),
+    private val supabaseRestService: SupabaseRestService = SupabaseRestService(SupabaseConfig(context))
 ) : ChatRepository {
 
     private val userDao = database.userDao()
@@ -79,23 +86,39 @@ class DefaultChatRepository(
             return@withContext Result.failure(IllegalArgumentException("Passwords do not match"))
         }
 
-        // Database uniqueness check
-        val existingUser = userDao.getUserByUsername(cleanUser)
-        if (existingUser != null) {
-            return@withContext Result.failure(IllegalArgumentException("Username @$cleanUser is already taken"))
+        val keyPairResult = PrivateKeyStore.generateKeyPair(context, cleanUser)
+        val (privateKey, publicKey) = when (keyPairResult) {
+            is PrivateKeyStore.KeyPairResult.Success -> keyPairResult.privateKey to keyPairResult.publicKey
+            is PrivateKeyStore.KeyPairResult.Error -> return@withContext Result.failure(keyPairResult.exception)
         }
 
-        val newId = "usr_${UUID.randomUUID().toString().take(8)}"
+        val publicKeyBase64 = PrivateKeyStore.publicKeyToBase64(publicKey)
+
+        val signUpResult = supabaseRestService.signUpWithMetadata(
+            email = cleanEmail,
+            password = password,
+            username = cleanUser,
+            name = cleanName,
+            age = age,
+            publicKey = publicKeyBase64
+        )
+
+        if (signUpResult.isFailure) {
+            PrivateKeyStore.deleteKeyPair(cleanUser)
+            return@withContext signUpResult.map { it as User } // type cast handled by caller
+        }
+
+        val authUserId = signUpResult.getOrThrow().user!!.id
+
         val avatarColors = listOf("#F59E0B", "#10B981", "#6366F1", "#EC4899", "#06B6D4")
         val randomColor = avatarColors.random()
 
         val newUser = UserEntity(
-            id = newId,
+            id = authUserId,
             username = cleanUser,
             name = cleanName,
             age = age,
             email = cleanEmail,
-            password = password,
             avatarColorHex = randomColor,
             isCurrentAccount = true,
             createdAt = System.currentTimeMillis()
@@ -106,8 +129,10 @@ class DefaultChatRepository(
             userDao.insertUser(newUser)
             Result.success(newUser.toDomainModel())
         } catch (e: SQLiteConstraintException) {
+            PrivateKeyStore.deleteKeyPair(cleanUser)
             Result.failure(IllegalArgumentException("Username @$cleanUser is already registered in the database"))
         } catch (e: Exception) {
+            PrivateKeyStore.deleteKeyPair(cleanUser)
             Result.failure(e)
         }
     }
@@ -125,22 +150,164 @@ class DefaultChatRepository(
             return@withContext Result.failure(IllegalArgumentException("Please enter your password"))
         }
 
-        val user = userDao.getUserByUsername(cleanUser)
-            ?: return@withContext Result.failure(IllegalArgumentException("No account found with username @$cleanUser"))
+        val loginResponse = supabaseRestService.loginWithUsername(cleanUser, password)
 
-        if (user.password != password) {
-            return@withContext Result.failure(IllegalArgumentException("Incorrect password"))
+        if (loginResponse == null) {
+            return@withContext Result.failure(IllegalArgumentException("Invalid username or password"))
         }
 
-        userDao.clearActiveAccounts()
-        userDao.setActiveAccount(user.id)
+        // Check email verification
+        if (loginResponse.emailConfirmedAt == null || loginResponse.emailConfirmedAt.isBlank()) {
+            return@withContext Result.failure(IllegalArgumentException("Please verify your email before logging in. Check your inbox for the verification link."))
+        }
+
+        val authUserId = loginResponse.user.id
+        val userEmail = loginResponse.user.email ?: ""
+
+        // Try local lookup first
+        var user = userDao.getUserByUsername(cleanUser)
+
+        // If not found locally, fetch from Supabase and create local cache
+        if (user == null) {
+            val profile = supabaseRestService.getProfileById(authUserId)
+                ?: return@withContext Result.failure(IllegalArgumentException("Failed to fetch user profile from server"))
+
+            // Check/create Keystore key pair for this user
+            val keyPairResult = PrivateKeyStore.generateKeyPair(context, cleanUser)
+            if (keyPairResult is PrivateKeyStore.KeyPairResult.Error) {
+                return@withContext Result.failure(keyPairResult.exception)
+            }
+
+            user = UserEntity(
+                id = authUserId,
+                username = profile.username,
+                name = profile.name,
+                age = 0, // age not in profile DTO; will be updated on next sync
+                email = userEmail,
+                avatarColorHex = "#F59E0B",
+                isCurrentAccount = true,
+                createdAt = System.currentTimeMillis()
+            )
+
+            try {
+                userDao.clearActiveAccounts()
+                userDao.insertUser(user)
+            } catch (e: SQLiteConstraintException) {
+                // Race condition: another thread inserted; fetch the existing one
+                user = userDao.getUserByUsername(cleanUser)
+                    ?: return@withContext Result.failure(IllegalArgumentException("Failed to create local user cache"))
+            } catch (e: Exception) {
+                return@withContext Result.failure(e)
+            }
+        } else {
+            // User exists locally; update active account
+            userDao.clearActiveAccounts()
+            userDao.setActiveAccount(user.id)
+        }
+
+        AuthTokenStore.saveTokens(
+            context,
+            loginResponse.accessToken,
+            loginResponse.refreshToken,
+            loginResponse.expiresIn.toLong()
+        )
 
         Result.success(user.toDomainModel())
     }
 
     override suspend fun logout(): Result<Unit> = withContext(Dispatchers.IO) {
+        val accessToken = AuthTokenStore.getAccessToken(context)
+        val refreshToken = AuthTokenStore.getRefreshToken(context)
+        if (accessToken != null && refreshToken != null) {
+            supabaseRestService.signOut(accessToken, refreshToken)
+        }
+        AuthTokenStore.clearTokens(context)
         userDao.clearActiveAccounts()
         Result.success(Unit)
+    }
+
+    override suspend fun restoreSession(): Result<User?> = withContext(Dispatchers.IO) {
+        if (!AuthTokenStore.hasValidSession(context)) {
+            return@withContext Result.success(null)
+        }
+
+        val accessToken = AuthTokenStore.getAccessToken(context)
+        val refreshToken = AuthTokenStore.getRefreshToken(context)
+
+        if (accessToken == null || refreshToken == null) {
+            AuthTokenStore.clearTokens(context)
+            return@withContext Result.success(null)
+        }
+
+        // If access token is expired, try to refresh
+        if (AuthTokenStore.isAccessTokenExpired(context)) {
+            val refreshResult = refreshSession()
+            return@withContext refreshResult
+        }
+
+        // Access token is still valid, get current user from local cache
+        val currentUser = userDao.getCurrentUser()
+        if (currentUser != null) {
+            return@withContext Result.success(currentUser.toDomainModel())
+        }
+
+        // No local user, try to restore from Supabase using access token
+        // For now, return null to force re-login
+        return@withContext Result.success(null)
+    }
+
+    override suspend fun refreshSession(): Result<User?> = withContext(Dispatchers.IO) {
+        val refreshToken = AuthTokenStore.getRefreshToken(context)
+            ?: return@withContext Result.failure(IllegalStateException("No refresh token available"))
+
+        val refreshResponse = supabaseRestService.refreshAccessToken(refreshToken)
+            ?: return@withContext Result.failure(IllegalStateException("Failed to refresh session"))
+
+        // Save new tokens
+        AuthTokenStore.saveTokens(
+            context,
+            refreshResponse.accessToken,
+            refreshResponse.refreshToken,
+            refreshResponse.expiresIn.toLong()
+        )
+
+        // Get user profile
+        val authUserId = refreshResponse.user.id
+        val profile = supabaseRestService.getProfileById(authUserId)
+            ?: return@withContext Result.failure(IllegalArgumentException("Failed to fetch user profile"))
+
+        // Check/create Keystore key pair
+        val keyPairResult = PrivateKeyStore.generateKeyPair(context, profile.username)
+        if (keyPairResult is PrivateKeyStore.KeyPairResult.Error) {
+            return@withContext Result.failure(keyPairResult.exception)
+        }
+
+        // Update or create local user
+        var user = userDao.getUserByUsername(profile.username)
+        if (user == null) {
+            user = UserEntity(
+                id = authUserId,
+                username = profile.username,
+                name = profile.name,
+                age = 0,
+                email = "",
+                avatarColorHex = "#F59E0B",
+                isCurrentAccount = true,
+                createdAt = System.currentTimeMillis()
+            )
+            try {
+                userDao.clearActiveAccounts()
+                userDao.insertUser(user)
+            } catch (e: SQLiteConstraintException) {
+                user = userDao.getUserByUsername(profile.username)
+                    ?: return@withContext Result.failure(IllegalArgumentException("Failed to create local user cache"))
+            }
+        } else {
+            userDao.clearActiveAccounts()
+            userDao.setActiveAccount(user.id)
+        }
+
+        Result.success(user.toDomainModel())
     }
 
     override suspend fun updateProfile(
@@ -167,6 +334,36 @@ class DefaultChatRepository(
         if (cleanQuery.isEmpty()) {
             emptyList()
         } else {
+            // Query Supabase as primary source for user discovery
+            val supabaseProfiles = supabaseRestService.searchProfiles(cleanQuery)
+
+            // Merge with local cache: upsert Supabase profiles into Room
+            if (supabaseProfiles.isNotEmpty()) {
+                val currentUserId = userDao.getCurrentUser()?.id
+                val usersToUpsert = supabaseProfiles.mapNotNull { profile ->
+                    // Skip current user
+                    if (currentUserId != null && profile.id == currentUserId) return@mapNotNull null
+                    UserEntity(
+                        id = profile.id,
+                        username = profile.username,
+                        name = profile.name,
+                        age = 0,
+                        email = profile.email ?: "",
+                        avatarColorHex = "#F59E0B",
+                        isCurrentAccount = false,
+                        createdAt = System.currentTimeMillis()
+                    )
+                }
+                if (usersToUpsert.isNotEmpty()) {
+                    try {
+                        userDao.insertUsers(usersToUpsert)
+                    } catch (e: Exception) {
+                        // Ignore conflicts; local cache is best-effort
+                    }
+                }
+            }
+
+            // Return merged results from local cache (now includes Supabase results)
             userDao.searchUsersList(cleanQuery).map { it.toDomainModel() }
         }
     }

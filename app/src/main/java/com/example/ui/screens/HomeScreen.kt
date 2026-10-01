@@ -21,6 +21,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.Image
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ChatBubble
@@ -28,6 +29,9 @@ import androidx.compose.material.icons.filled.ChatBubbleOutline
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Logout
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
+import com.example.R
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Palette
@@ -375,10 +379,10 @@ fun HomeScreen(
                             .background(DarkSurfaceVariant)
                             .border(1.dp, QuickChatPrimary, RoundedCornerShape(8.dp))
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.ChatBubble,
-                            contentDescription = null,
-                            tint = QuickChatPrimary,
+                        Image(
+                            painter = painterResource(id = R.drawable.quick_chat_brand_icon),
+                            contentDescription = "Quick Chat Logo",
+                            contentScale = ContentScale.Fit,
                             modifier = Modifier.size(20.dp)
                         )
                     }

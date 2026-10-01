@@ -1,6 +1,5 @@
 package com.example.ui.screens
 
-import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -50,10 +49,9 @@ fun RegisterScreen(
     onNavigateBack: () -> Unit,
     onRegistrationSuccess: () -> Unit,
     onNavigateToLogin: () -> Unit,
+    onVerificationSent: (email: String) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    BackHandler { onNavigateBack() }
-
     val authState by viewModel.uiState.collectAsStateWithLifecycle()
 
     var name by remember { mutableStateOf("") }
@@ -65,9 +63,20 @@ fun RegisterScreen(
     var clientError by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(authState) {
-        if (authState is AuthUiState.Authenticated) {
-            onRegistrationSuccess()
+        val currentState = authState
+        when (currentState) {
+            is AuthUiState.Authenticated -> onRegistrationSuccess()
+            is AuthUiState.VerificationSent -> onVerificationSent(currentState.email)
+            is AuthUiState.Error -> { /* handled in UI */ }
+            is AuthUiState.Loading -> { /* handled in UI */ }
+            is AuthUiState.Idle -> { /* handled in UI */ }
         }
+    }
+
+    val showForm = authState !is AuthUiState.VerificationSent
+    val verificationEmail = when (val currentState = authState) {
+        is AuthUiState.VerificationSent -> currentState.email
+        else -> null
     }
 
     Column(
@@ -79,8 +88,8 @@ fun RegisterScreen(
             .testTag("register_screen")
     ) {
         QuickChatTopBar(
-            title = "Create Account",
-            subtitle = "Registration (Step 1 of 1)",
+            title = if (showForm) "Create Account" else "Verify Your Email",
+            subtitle = if (showForm) "Registration (Step 1 of 1)" else "Check your inbox",
             navigationIcon = Icons.AutoMirrored.Filled.ArrowBack,
             onNavigationClick = onNavigateBack
         )
@@ -94,150 +103,196 @@ fun RegisterScreen(
         ) {
             Spacer(modifier = Modifier.height(12.dp))
 
-            // 1. Name
-            QuickChatTextField(
-                value = name,
-                onValueChange = {
-                    name = it
-                    clientError = null
-                },
-                label = "Full Name",
-                placeholder = "e.g. Jordan Hayes",
-                leadingIcon = Icons.Default.Badge,
-                testTag = "register_name_input"
-            )
-
-            Spacer(modifier = Modifier.height(14.dp))
-
-            // 2. Username (Primary Identity)
-            QuickChatTextField(
-                value = username,
-                onValueChange = {
-                    username = it.lowercase().filter { ch -> ch.isLetterOrDigit() || ch == '_' }
-                    clientError = null
-                },
-                label = "Username (3-20 chars, lowercase & _)",
-                placeholder = "e.g. jordan_hayes",
-                leadingIcon = Icons.Default.Person,
-                testTag = "register_username_input"
-            )
-
-            Spacer(modifier = Modifier.height(14.dp))
-
-            // 3. Age
-            QuickChatTextField(
-                value = ageText,
-                onValueChange = {
-                    ageText = it.filter { ch -> ch.isDigit() }.take(3)
-                    clientError = null
-                },
-                label = "Age",
-                placeholder = "e.g. 24",
-                leadingIcon = Icons.Default.Numbers,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                testTag = "register_age_input"
-            )
-
-            Spacer(modifier = Modifier.height(14.dp))
-
-            // 4. Email (For verification/recovery only)
-            QuickChatTextField(
-                value = email,
-                onValueChange = {
-                    email = it
-                    clientError = null
-                },
-                label = "Email Address (Verification only)",
-                placeholder = "jordan@example.com",
-                leadingIcon = Icons.Default.Email,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
-                testTag = "register_email_input"
-            )
-
-            Spacer(modifier = Modifier.height(14.dp))
-
-            // 5. Password
-            QuickChatTextField(
-                value = password,
-                onValueChange = {
-                    password = it
-                    clientError = null
-                },
-                label = "Password",
-                placeholder = "Minimum 6 characters",
-                leadingIcon = Icons.Default.Lock,
-                visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                testTag = "register_password_input"
-            )
-
-            Spacer(modifier = Modifier.height(14.dp))
-
-            // 6. Confirm Password
-            QuickChatTextField(
-                value = confirmPassword,
-                onValueChange = {
-                    confirmPassword = it
-                    clientError = null
-                },
-                label = "Confirm Password",
-                placeholder = "Re-enter password",
-                leadingIcon = Icons.Default.Lock,
-                visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                testTag = "register_confirm_password_input"
-            )
-
-            val displayError = clientError ?: (authState as? AuthUiState.Error)?.message
-            if (displayError != null) {
-                Spacer(modifier = Modifier.height(12.dp))
-                Text(
-                    text = displayError,
-                    color = StatusError,
-                    fontSize = 13.sp
+            if (showForm) {
+                // Registration form
+                // 1. Name
+                QuickChatTextField(
+                    value = name,
+                    onValueChange = {
+                        name = it
+                        clientError = null
+                    },
+                    label = "Full Name",
+                    placeholder = "e.g. Jordan Hayes",
+                    leadingIcon = Icons.Default.Badge,
+                    testTag = "register_name_input"
                 )
-            }
 
-            Spacer(modifier = Modifier.height(26.dp))
+                Spacer(modifier = Modifier.height(14.dp))
 
-            QuickChatButton(
-                text = "Create Account",
-                onClick = {
-                    val ageInt = ageText.toIntOrNull()
-                    when {
-                        name.isBlank() -> clientError = "Please enter your name"
-                        username.length < 3 -> clientError = "Username must be at least 3 characters"
-                        ageInt == null || ageInt < 13 -> clientError = "Please enter a valid age (13 or older)"
-                        !email.contains("@") || !email.contains(".") -> clientError = "Please enter a valid email address"
-                        password.length < 6 -> clientError = "Password must be at least 6 characters"
-                        password != confirmPassword -> clientError = "Passwords do not match"
-                        else -> {
-                            clientError = null
-                            viewModel.register(
-                                name = name,
-                                username = username,
-                                age = ageInt,
-                                email = email,
-                                pass = password,
-                                confirmPass = confirmPassword
-                            )
+                // 2. Username (Primary Identity)
+                QuickChatTextField(
+                    value = username,
+                    onValueChange = {
+                        username = it.lowercase().filter { ch -> ch.isLetterOrDigit() || ch == '_' }
+                        clientError = null
+                    },
+                    label = "Username (3-20 chars, lowercase & _)",
+                    placeholder = "e.g. jordan_hayes",
+                    leadingIcon = Icons.Default.Person,
+                    testTag = "register_username_input"
+                )
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // 3. Age
+                QuickChatTextField(
+                    value = ageText,
+                    onValueChange = {
+                        ageText = it.filter { ch -> ch.isDigit() }.take(3)
+                        clientError = null
+                    },
+                    label = "Age",
+                    placeholder = "e.g. 24",
+                    leadingIcon = Icons.Default.Numbers,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    testTag = "register_age_input"
+                )
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // 4. Email (For verification/recovery only)
+                QuickChatTextField(
+                    value = email,
+                    onValueChange = {
+                        email = it
+                        clientError = null
+                    },
+                    label = "Email Address (Verification only)",
+                    placeholder = "jordan@example.com",
+                    leadingIcon = Icons.Default.Email,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                    testTag = "register_email_input"
+                )
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // 5. Password
+                QuickChatTextField(
+                    value = password,
+                    onValueChange = {
+                        password = it
+                        clientError = null
+                    },
+                    label = "Password",
+                    placeholder = "Minimum 6 characters",
+                    leadingIcon = Icons.Default.Lock,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    testTag = "register_password_input"
+                )
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // 6. Confirm Password
+                QuickChatTextField(
+                    value = confirmPassword,
+                    onValueChange = {
+                        confirmPassword = it
+                        clientError = null
+                    },
+                    label = "Confirm Password",
+                    placeholder = "Re-enter password",
+                    leadingIcon = Icons.Default.Lock,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    testTag = "register_confirm_password_input"
+                )
+
+                val displayError = clientError ?: (authState as? AuthUiState.Error)?.message
+                if (displayError != null) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = displayError,
+                        color = StatusError,
+                        fontSize = 13.sp
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(26.dp))
+
+                QuickChatButton(
+                    text = "Create Account",
+                    onClick = {
+                        val ageInt = ageText.toIntOrNull()
+                        when {
+                            name.isBlank() -> clientError = "Please enter your name"
+                            username.length < 3 -> clientError = "Username must be at least 3 characters"
+                            ageInt == null || ageInt < 13 -> clientError = "Please enter a valid age (13 or older)"
+                            !email.contains("@") || !email.contains(".") -> clientError = "Please enter a valid email address"
+                            password.length < 6 -> clientError = "Password must be at least 6 characters"
+                            password != confirmPassword -> clientError = "Passwords do not match"
+                            else -> {
+                                clientError = null
+                                viewModel.register(
+                                    name = name,
+                                    username = username,
+                                    age = ageInt,
+                                    email = email,
+                                    pass = password,
+                                    confirmPass = confirmPassword
+                                )
+                            }
                         }
-                    }
-                },
-                isLoading = authState is AuthUiState.Loading,
-                testTag = "register_submit_button"
-            )
+                    },
+                    isLoading = authState is AuthUiState.Loading,
+                    testTag = "register_submit_button"
+                )
 
-            Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(16.dp))
 
-            TextButton(
-                onClick = onNavigateToLogin,
-                modifier = Modifier.testTag("switch_to_login_button")
-            ) {
+                TextButton(
+                    onClick = onNavigateToLogin,
+                    modifier = Modifier.testTag("switch_to_login_button")
+                ) {
+                    Text(
+                        text = "Already have an account? Sign In",
+                        color = QuickChatPrimary,
+                        fontSize = 14.sp
+                    )
+                }
+            } else {
+                // Verification sent screen
+                Spacer(modifier = Modifier.height(24.dp))
+
                 Text(
-                    text = "Already have an account? Sign In",
-                    color = QuickChatPrimary,
-                    fontSize = 14.sp
+                    text = "📧",
+                    fontSize = 64.sp
+                )
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Text(
+                    text = "Verification Email Sent",
+                    fontSize = 22.sp,
+                    color = QuickChatPrimary
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                verificationEmail?.let { emailAddr ->
+                    Text(
+                        text = "We've sent a verification email to\n$emailAddr",
+                        fontSize = 16.sp,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Text(
+                    text = "Please check your inbox (and spam folder) and click the verification link. After verifying, return here to sign in.",
+                    fontSize = 14.sp,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    color = androidx.compose.ui.graphics.Color.Gray
+                )
+
+                Spacer(modifier = Modifier.height(32.dp))
+
+                QuickChatButton(
+                    text = "Go to Sign In",
+                    onClick = onNavigateToLogin,
+                    testTag = "go_to_login_button"
                 )
             }
         }

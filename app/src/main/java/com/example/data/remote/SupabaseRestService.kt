@@ -35,12 +35,29 @@ class SupabaseRestService(
 
     private val authReqAdapter = moshi.adapter(SupabaseAuthRequest::class.java)
     private val authRespAdapter = moshi.adapter(SupabaseAuthResponse::class.java)
+    private val usernameLoginReqAdapter = moshi.adapter(UsernameLoginRequest::class.java)
+    private val usernameLoginRespAdapter = moshi.adapter(UsernameLoginResponse::class.java)
+    private val signUpReqAdapter = moshi.adapter(SignUpRequest::class.java)
+    private val searchProfilesReqAdapter = moshi.adapter(SearchProfilesRequest::class.java)
+    private val searchProfilesRespAdapter = moshi.adapter(SearchProfilesResponse::class.java)
+    private val refreshTokenReqAdapter = moshi.adapter(RefreshTokenRequest::class.java)
+    private val refreshTokenRespAdapter = moshi.adapter(RefreshTokenResponse::class.java)
 
     private fun buildRequest(path: String): Request.Builder {
         val baseUrl = config.currentUrl.removeSuffix("/")
         val anonKey = config.currentAnonKey
         return Request.Builder()
             .url("$baseUrl$path")
+            .header("apikey", anonKey)
+            .header("Authorization", "Bearer $anonKey")
+            .header("Content-Type", "application/json")
+    }
+
+    private fun buildEdgeFunctionRequest(functionName: String): Request.Builder {
+        val baseUrl = config.currentUrl.removeSuffix("/")
+        val anonKey = config.currentAnonKey
+        return Request.Builder()
+            .url("$baseUrl/functions/v1/$functionName")
             .header("apikey", anonKey)
             .header("Authorization", "Bearer $anonKey")
             .header("Content-Type", "application/json")
@@ -132,6 +149,70 @@ class SupabaseRestService(
     }
 
     /**
+     * Username-only login via Edge Function.
+     * Sends username + password, Edge Function resolves email server-side and authenticates.
+     */
+    suspend fun loginWithUsername(username: String, password: String): UsernameLoginResponse? = withContext(Dispatchers.IO) {
+        try {
+            val req = UsernameLoginRequest(username = username.trim().lowercase(), password = password)
+            val json = usernameLoginReqAdapter.toJson(req)
+            val body = json.toRequestBody(jsonMediaType)
+            val request = buildEdgeFunctionRequest("login-with-username")
+                .post(body)
+                .build()
+
+            val response = okHttpClient.newCall(request).execute()
+            if (!response.isSuccessful) return@withContext null
+
+            val responseBody = response.body?.string() ?: return@withContext null
+            usernameLoginRespAdapter.fromJson(responseBody)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Registers a new user with Supabase GoTrue Auth including metadata.
+     * Metadata includes username, name, age, and public_key for profile creation.
+     */
+    suspend fun signUpWithMetadata(
+        email: String,
+        password: String,
+        username: String,
+        name: String,
+        age: Int,
+        publicKey: String
+    ): Result<SupabaseAuthResponse> = withContext(Dispatchers.IO) {
+        try {
+            val metadata = SignUpMetadata(username = username, name = name, age = age, publicKey = publicKey)
+            val req = SignUpRequest(email = email, password = password, data = metadata)
+            val json = signUpReqAdapter.toJson(req)
+            val body = json.toRequestBody(jsonMediaType)
+            val request = buildRequest("/auth/v1/signup")
+                .post(body)
+                .build()
+
+            val response = okHttpClient.newCall(request).execute()
+            val responseBody = response.body?.string() ?: ""
+
+            if (!response.isSuccessful) {
+                val errorMsg = when {
+                    responseBody.isNotEmpty() -> responseBody
+                    else -> "HTTP ${response.code}: ${response.message}"
+                }
+                return@withContext Result.failure(Exception("Supabase signup failed: $errorMsg"))
+            }
+
+            val authResponse = authRespAdapter.fromJson(responseBody)
+                ?: return@withContext Result.failure(Exception("Failed to parse signup response"))
+
+            Result.success(authResponse)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
      * Upserts user public profile (ID, username, email, public_key).
      */
     suspend fun upsertProfile(profile: SupabaseProfileDto): Boolean = withContext(Dispatchers.IO) {
@@ -151,27 +232,53 @@ class SupabaseRestService(
     }
 
     /**
-     * Searches profiles by username or email.
+     * Searches profiles by username via Edge Function.
      */
     suspend fun searchProfiles(query: String): List<SupabaseProfileDto> = withContext(Dispatchers.IO) {
         try {
-            val request = buildRequest("/rest/v1/profiles?username=ilike.*$query*&select=*")
-                .get()
+            val req = SearchProfilesRequest(query = query.trim().lowercase())
+            val json = searchProfilesReqAdapter.toJson(req)
+            val body = json.toRequestBody(jsonMediaType)
+            val request = buildEdgeFunctionRequest("search-profiles")
+                .post(body)
                 .build()
 
             val response = okHttpClient.newCall(request).execute()
             if (!response.isSuccessful) return@withContext emptyList()
 
-            val body = response.body?.string() ?: return@withContext emptyList()
-            profileListAdapter.fromJson(body) ?: emptyList()
+            val responseBody = response.body?.string() ?: return@withContext emptyList()
+            val searchResponse = searchProfilesRespAdapter.fromJson(responseBody)
+            return@withContext searchResponse?.profiles ?: emptyList()
         } catch (e: Exception) {
             emptyList()
         }
     }
 
     /**
-     * Authenticates with Supabase GoTrue Auth.
+     * Fetches a profile by user ID.
      */
+    suspend fun getProfileById(userId: String): SupabaseProfileDto? = withContext(Dispatchers.IO) {
+        try {
+            val request = buildRequest("/rest/v1/profiles?id=eq.$userId&select=id,username,name,public_key,created_at")
+                .get()
+                .build()
+
+            val response = okHttpClient.newCall(request).execute()
+            if (!response.isSuccessful) return@withContext null
+
+            val body = response.body?.string() ?: return@withContext null
+            val profiles = profileListAdapter.fromJson(body) ?: return@withContext null
+            return@withContext profiles.firstOrNull()
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Authenticates with Supabase GoTrue Auth (legacy email-based).
+     * Kept for compatibility but not used in username-only flow.
+     */
+    @Deprecated("Use loginWithUsername instead", ReplaceWith("loginWithUsername(username, password)"))
     suspend fun signInWithPassword(req: SupabaseAuthRequest): SupabaseAuthResponse? = withContext(Dispatchers.IO) {
         try {
             val json = authReqAdapter.toJson(req)
@@ -191,8 +298,10 @@ class SupabaseRestService(
     }
 
     /**
-     * Registers a new user with Supabase GoTrue Auth.
+     * Registers a new user with Supabase GoTrue Auth (legacy email-based).
+     * Kept for compatibility but not used in metadata-based flow.
      */
+    @Deprecated("Use signUpWithMetadata instead", ReplaceWith("signUpWithMetadata(email, password, username, name, age, publicKey)"))
     suspend fun signUpWithPassword(req: SupabaseAuthRequest): SupabaseAuthResponse? = withContext(Dispatchers.IO) {
         try {
             val json = authReqAdapter.toJson(req)
@@ -208,6 +317,45 @@ class SupabaseRestService(
             authRespAdapter.fromJson(respBody)
         } catch (e: Exception) {
             null
+        }
+    }
+
+    /**
+     * Refreshes the access token using the refresh token.
+     */
+    suspend fun refreshAccessToken(refreshToken: String): RefreshTokenResponse? = withContext(Dispatchers.IO) {
+        try {
+            val req = RefreshTokenRequest(refreshToken = refreshToken)
+            val json = refreshTokenReqAdapter.toJson(req)
+            val body = json.toRequestBody(jsonMediaType)
+            val request = buildRequest("/auth/v1/token?grant_type=refresh_token")
+                .post(body)
+                .build()
+
+            val response = okHttpClient.newCall(request).execute()
+            if (!response.isSuccessful) return@withContext null
+
+            val respBody = response.body?.string() ?: return@withContext null
+            refreshTokenRespAdapter.fromJson(respBody)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Signs out the user (revokes the refresh token).
+     */
+    suspend fun signOut(accessToken: String, refreshToken: String): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val request = buildRequest("/auth/v1/logout")
+                .header("Authorization", "Bearer $accessToken")
+                .post("{\"refresh_token\": \"$refreshToken\"}".toRequestBody(jsonMediaType))
+                .build()
+
+            val response = okHttpClient.newCall(request).execute()
+            response.isSuccessful
+        } catch (e: Exception) {
+            false
         }
     }
 }

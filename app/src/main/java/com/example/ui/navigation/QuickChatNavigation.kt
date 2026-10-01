@@ -81,6 +81,10 @@ fun QuickChatNavGraph(
                     navController.navigate(Screen.Login.route) {
                         popUpTo(Screen.Register.route) { inclusive = true }
                     }
+                },
+                onVerificationSent = { email ->
+                    // Stay on register screen to show verification message
+                    // The RegisterScreen handles the verification UI internally
                 }
             )
         }

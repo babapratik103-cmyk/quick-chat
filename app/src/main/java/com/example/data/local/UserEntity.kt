@@ -16,7 +16,6 @@ data class UserEntity(
     val name: String,
     val age: Int,
     val email: String,
-    val password: String = "",
     val avatarColorHex: String = "#F59E0B",
     val isCurrentAccount: Boolean = false,
     val createdAt: Long = System.currentTimeMillis()

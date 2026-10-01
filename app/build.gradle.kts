@@ -1,4 +1,6 @@
 import com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesStrategy
+import java.io.File
+import java.util.Properties
 
 plugins {
   alias(libs.plugins.android.application)
@@ -20,6 +22,11 @@ android {
     versionName = "1.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+    // Supabase Publishable Key from local.properties (not committed to git)
+    val localProperties = Properties().apply { file("../local.properties").inputStream().use { load(it) } }
+    val supabasePublishableKey = localProperties.getProperty("SUPABASE_PUBLISHABLE_KEY") ?: "public-anon-key-placeholder"
+    buildConfigField("String", "SUPABASE_PUBLISHABLE_KEY", "\"$supabasePublishableKey\"")
   }
 
   signingConfigs {
@@ -48,8 +55,8 @@ android {
     debug { signingConfig = signingConfigs.getByName("debugConfig") }
   }
   compileOptions {
-    sourceCompatibility = JavaVersion.VERSION_11
-    targetCompatibility = JavaVersion.VERSION_11
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
   }
   buildFeatures {
     compose = true
@@ -60,6 +67,11 @@ android {
     includeInApk = false
     includeInBundle = true
   }
+}
+
+// Configure Kotlin JVM target for all Kotlin compile tasks
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+  compilerOptions.jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21)
 }
 
 // Configure the Secrets Gradle Plugin to use .env and .env.example files

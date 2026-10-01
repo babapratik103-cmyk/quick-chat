@@ -17,6 +17,7 @@ sealed class AuthUiState {
     object Loading : AuthUiState()
     data class Authenticated(val user: User) : AuthUiState()
     data class Error(val message: String) : AuthUiState()
+    data class VerificationSent(val email: String) : AuthUiState()
 }
 
 class AuthViewModel @JvmOverloads constructor(
@@ -28,18 +29,25 @@ class AuthViewModel @JvmOverloads constructor(
     val uiState: StateFlow<AuthUiState> = _uiState.asStateFlow()
 
     init {
-        checkCurrentSession()
+        restoreSession()
     }
 
-    fun checkCurrentSession() {
+    fun restoreSession() {
         viewModelScope.launch {
             _uiState.value = AuthUiState.Loading
-            val currentUser = repository.currentUserFlow.firstOrNull()
-            if (currentUser != null) {
-                _uiState.value = AuthUiState.Authenticated(currentUser)
-            } else {
-                _uiState.value = AuthUiState.Idle
-            }
+            val result = repository.restoreSession()
+            result.fold(
+                onSuccess = { user ->
+                    if (user != null) {
+                        _uiState.value = AuthUiState.Authenticated(user)
+                    } else {
+                        _uiState.value = AuthUiState.Idle
+                    }
+                },
+                onFailure = { error ->
+                    _uiState.value = AuthUiState.Idle
+                }
+            )
         }
     }
 
@@ -89,7 +97,7 @@ class AuthViewModel @JvmOverloads constructor(
             )
             result.fold(
                 onSuccess = { user ->
-                    _uiState.value = AuthUiState.Authenticated(user)
+                    _uiState.value = AuthUiState.VerificationSent(email = email)
                 },
                 onFailure = { error ->
                     _uiState.value = AuthUiState.Error(error.localizedMessage ?: "Registration failed")
@@ -100,5 +108,17 @@ class AuthViewModel @JvmOverloads constructor(
 
     fun resetState() {
         _uiState.value = AuthUiState.Idle
+    }
+
+    fun logout(onLoggedOut: () -> Unit) {
+        viewModelScope.launch {
+            _uiState.value = AuthUiState.Loading
+            val result = repository.logout()
+            result.fold(
+                onSuccess = { _uiState.value = AuthUiState.Idle },
+                onFailure = { _uiState.value = AuthUiState.Idle }
+            )
+            onLoggedOut()
+        }
     }
 }

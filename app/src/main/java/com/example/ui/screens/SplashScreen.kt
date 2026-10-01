@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import com.example.R
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -17,10 +18,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.Image
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChatBubble
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -75,7 +79,7 @@ fun SplashScreen(
         ) {
             Spacer(modifier = Modifier.weight(1f))
 
-            // Center Branding
+            // Center Branding - Full artwork, no crop
             AnimatedVisibility(
                 visible = isVisible,
                 enter = fadeIn(tween(500)) + slideInVertically(tween(500)) { 40 }
@@ -84,21 +88,12 @@ fun SplashScreen(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Box(
-                        contentAlignment = Alignment.Center,
-                        modifier = Modifier
-                            .size(92.dp)
-                            .clip(RoundedCornerShape(24.dp))
-                            .background(DarkSurface)
-                            .border(2.dp, QuickChatPrimary, RoundedCornerShape(24.dp))
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.ChatBubble,
-                            contentDescription = "Quick Chat Logo",
-                            tint = QuickChatPrimary,
-                            modifier = Modifier.size(50.dp)
-                        )
-                    }
+                    Image(
+                        painter = painterResource(id = R.drawable.quick_chat_brand_icon),
+                        contentDescription = "Quick Chat Logo",
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.size(140.dp)
+                    )
 
                     Spacer(modifier = Modifier.height(24.dp))
 
