@@ -3,9 +3,13 @@ package com.example.data.local
 import androidx.room.Entity
 import androidx.room.PrimaryKey
 
-@Entity(tableName = "conversations")
+@Entity(
+    tableName = "conversations",
+    indices = [androidx.room.Index(value = ["peerId"])]
+)
 data class ConversationEntity(
-    @PrimaryKey val id: String, // peerId
+    @PrimaryKey val id: String, // Supabase conversation UUID
+    val peerId: String, // Peer user UUID
     val peerUsername: String,
     val peerDisplayName: String,
     val peerAvatarColorHex: String = "#F59E0B",

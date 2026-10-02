@@ -1,5 +1,6 @@
 package com.example.data.remote
 
+import android.util.Log
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.Types
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
@@ -42,6 +43,8 @@ class SupabaseRestService(
     private val searchProfilesRespAdapter = moshi.adapter(SearchProfilesResponse::class.java)
     private val refreshTokenReqAdapter = moshi.adapter(RefreshTokenRequest::class.java)
     private val refreshTokenRespAdapter = moshi.adapter(RefreshTokenResponse::class.java)
+    private val createConversationReqAdapter = moshi.adapter(CreateConversationRequest::class.java)
+    private val createConversationRespAdapter = moshi.adapter(CreateConversationResponse::class.java)
 
     private fun buildRequest(path: String): Request.Builder {
         val baseUrl = config.currentUrl.removeSuffix("/")
@@ -53,6 +56,16 @@ class SupabaseRestService(
             .header("Content-Type", "application/json")
     }
 
+    private fun buildAuthenticatedRequest(path: String, accessToken: String): Request.Builder {
+        val baseUrl = config.currentUrl.removeSuffix("/")
+        val anonKey = config.currentAnonKey
+        return Request.Builder()
+            .url("$baseUrl$path")
+            .header("apikey", anonKey)
+            .header("Authorization", "Bearer $accessToken")
+            .header("Content-Type", "application/json")
+    }
+
     private fun buildEdgeFunctionRequest(functionName: String): Request.Builder {
         val baseUrl = config.currentUrl.removeSuffix("/")
         val anonKey = config.currentAnonKey
@@ -60,6 +73,16 @@ class SupabaseRestService(
             .url("$baseUrl/functions/v1/$functionName")
             .header("apikey", anonKey)
             .header("Authorization", "Bearer $anonKey")
+            .header("Content-Type", "application/json")
+    }
+
+    private fun buildEdgeFunctionAuthenticatedRequest(functionName: String, accessToken: String): Request.Builder {
+        val baseUrl = config.currentUrl.removeSuffix("/")
+        val anonKey = config.currentAnonKey
+        return Request.Builder()
+            .url("$baseUrl/functions/v1/$functionName")
+            .header("apikey", anonKey)
+            .header("Authorization", "Bearer $accessToken")
             .header("Content-Type", "application/json")
     }
 
@@ -78,30 +101,60 @@ class SupabaseRestService(
     }
 
     /**
-     * Inserts an encrypted message into temporary Supabase storage.
+     * Inserts a message into Supabase using the user's access token for RLS.
+     * Returns the server-generated message ID on success.
      */
-    suspend fun insertMessage(message: SupabaseMessageDto): Boolean = withContext(Dispatchers.IO) {
+    suspend fun insertMessage(message: SupabaseMessageDto, accessToken: String): String? = withContext(Dispatchers.IO) {
+        Log.d("QC_REST", "insertMessage called: conversationId=${message.conversationId}, senderId=${message.senderId}")
         try {
-            val json = messageAdapter.toJson(message)
+            // Manually construct JSON without the id field (server generates it)
+            // Exclude media_ciphertext - column does not exist in current schema
+            val json = """{
+                "sender_id": "${message.senderId}",
+                "recipient_id": "${message.recipientId}",
+                "conversation_id": "${message.conversationId}",
+                "ciphertext": "${message.ciphertext}",
+                "iv": "${message.iv}",
+                "created_at": "${message.createdAt}",
+                "expires_at": "${message.expiresAt}"
+            }""".trimIndent()
             val body = json.toRequestBody(jsonMediaType)
-            val request = buildRequest("/rest/v1/messages")
-                .header("Prefer", "return=minimal")
+            val request = Request.Builder()
+                .url("${config.currentUrl.removeSuffix("/")}/rest/v1/messages")
+                .header("apikey", config.currentAnonKey)
+                .header("Authorization", "Bearer $accessToken")
+                .header("Content-Type", "application/json")
+                .header("Prefer", "return=representation")
                 .post(body)
                 .build()
 
+            Log.d("QC_REST", "Inserting message to conversation ${message.conversationId}")
             val response = okHttpClient.newCall(request).execute()
-            response.isSuccessful
+            val responseBody = response.body?.string() ?: ""
+            Log.d("QC_REST", "Insert message response: HTTP ${response.code} - bodyLen=${responseBody.length}")
+            
+            if (!response.isSuccessful) {
+                Log.e("QC_REST", "insertMessage FAILED: HTTP ${response.code}, body=$responseBody")
+                return@withContext null
+            }
+            
+            // Parse the returned message to get the server-generated ID
+            val messages = messageListAdapter.fromJson(responseBody)
+            val serverId = messages?.firstOrNull()?.id
+            Log.d("QC_REST", "insertMessage success: serverMessageId=$serverId")
+            return@withContext serverId
         } catch (e: Exception) {
-            false
+            Log.e("QC_REST", "insertMessage EXCEPTION: ${e.message}", e)
+            null
         }
     }
 
     /**
-     * Fetches pending messages for this recipient.
+     * Fetches messages for a conversation using authenticated user JWT.
      */
-    suspend fun fetchPendingMessages(recipientId: String): List<SupabaseMessageDto> = withContext(Dispatchers.IO) {
+    suspend fun fetchMessages(conversationId: String, accessToken: String): List<SupabaseMessageDto> = withContext(Dispatchers.IO) {
         try {
-            val request = buildRequest("/rest/v1/messages?recipient_id=eq.$recipientId&select=*&order=created_at.asc")
+            val request = buildAuthenticatedRequest("/rest/v1/messages?conversation_id=eq.$conversationId&select=*&order=created_at.asc", accessToken)
                 .get()
                 .build()
 
@@ -118,10 +171,11 @@ class SupabaseRestService(
     /**
      * ACK-based Deletion:
      * Immediately and permanently purges the message from Supabase after local receipt.
+     * Uses authenticated user JWT for RLS.
      */
-    suspend fun acknowledgeAndDeleteMessage(messageId: String): Boolean = withContext(Dispatchers.IO) {
+    suspend fun acknowledgeAndDeleteMessage(messageId: String, accessToken: String): Boolean = withContext(Dispatchers.IO) {
         try {
-            val request = buildRequest("/rest/v1/messages?id=eq.$messageId")
+            val request = buildAuthenticatedRequest("/rest/v1/messages?id=eq.$messageId", accessToken)
                 .delete()
                 .build()
 
@@ -134,10 +188,11 @@ class SupabaseRestService(
 
     /**
      * Purges messages that have exceeded their 7-day TTL fallback.
+     * Uses authenticated user JWT for RLS.
      */
-    suspend fun deleteExpiredMessages(currentIsoTime: String): Boolean = withContext(Dispatchers.IO) {
+    suspend fun deleteExpiredMessages(currentIsoTime: String, accessToken: String): Boolean = withContext(Dispatchers.IO) {
         try {
-            val request = buildRequest("/rest/v1/messages?expires_at=lt.$currentIsoTime")
+            val request = buildAuthenticatedRequest("/rest/v1/messages?expires_at=lt.$currentIsoTime", accessToken)
                 .delete()
                 .build()
 
@@ -214,12 +269,13 @@ class SupabaseRestService(
 
     /**
      * Upserts user public profile (ID, username, email, public_key).
+     * Uses authenticated user JWT for RLS.
      */
-    suspend fun upsertProfile(profile: SupabaseProfileDto): Boolean = withContext(Dispatchers.IO) {
+    suspend fun upsertProfile(profile: SupabaseProfileDto, accessToken: String): Boolean = withContext(Dispatchers.IO) {
         try {
             val json = profileAdapter.toJson(profile)
             val body = json.toRequestBody(jsonMediaType)
-            val request = buildRequest("/rest/v1/profiles")
+            val request = buildAuthenticatedRequest("/rest/v1/profiles", accessToken)
                 .header("Prefer", "resolution=merge-duplicates")
                 .post(body)
                 .build()
@@ -255,11 +311,11 @@ class SupabaseRestService(
     }
 
     /**
-     * Fetches a profile by user ID.
+     * Fetches a profile by user ID using the user's access token for RLS.
      */
-    suspend fun getProfileById(userId: String): SupabaseProfileDto? = withContext(Dispatchers.IO) {
+    suspend fun getProfileById(userId: String, accessToken: String): SupabaseProfileDto? = withContext(Dispatchers.IO) {
         try {
-            val request = buildRequest("/rest/v1/profiles?id=eq.$userId&select=id,username,name,public_key,created_at")
+            val request = buildAuthenticatedRequest("/rest/v1/profiles?id=eq.$userId&select=id,username,name,public_key,created_at", accessToken)
                 .get()
                 .build()
 
@@ -356,6 +412,38 @@ class SupabaseRestService(
             response.isSuccessful
         } catch (e: Exception) {
             false
+        }
+    }
+
+    /**
+     * Creates a 1-to-1 conversation with another user.
+     * Calls the create-conversation Edge Function which uses the Supabase create_conversation RPC.
+     * Uses authenticated user JWT for RLS.
+     */
+    suspend fun createConversation(peerId: String, accessToken: String): CreateConversationResponse? = withContext(Dispatchers.IO) {
+        Log.d("QC_REST", "createConversation called: peerId=$peerId")
+        try {
+            val req = CreateConversationRequest(peerId = peerId)
+            val json = createConversationReqAdapter.toJson(req)
+            val body = json.toRequestBody(jsonMediaType)
+            val request = buildEdgeFunctionAuthenticatedRequest("create-conversation", accessToken)
+                .post(body)
+                .build()
+
+            val response = okHttpClient.newCall(request).execute()
+            val responseBody = response.body?.string() ?: ""
+            Log.d("QC_REST", "createConversation response: HTTP ${response.code}, bodyLen=${responseBody.length}")
+            if (!response.isSuccessful) {
+                Log.e("QC_REST", "createConversation FAILED: HTTP ${response.code}, body=$responseBody")
+                return@withContext null
+            }
+
+            val result = createConversationRespAdapter.fromJson(responseBody)
+            Log.d("QC_REST", "createConversation success: conversationId=${result?.id}")
+            return@withContext result
+        } catch (e: Exception) {
+            Log.e("QC_REST", "createConversation EXCEPTION: ${e.message}", e)
+            null
         }
     }
 }

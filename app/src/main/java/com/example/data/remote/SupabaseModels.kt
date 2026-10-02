@@ -5,9 +5,10 @@ import com.squareup.moshi.JsonClass
 
 @JsonClass(generateAdapter = true)
 data class SupabaseMessageDto(
-    @Json(name = "id") val id: String,
+    @Json(name = "id") val id: String? = null,
     @Json(name = "sender_id") val senderId: String,
     @Json(name = "recipient_id") val recipientId: String,
+    @Json(name = "conversation_id") val conversationId: String,
     @Json(name = "ciphertext") val ciphertext: String,
     @Json(name = "iv") val iv: String,
     @Json(name = "media_ciphertext") val mediaCiphertext: String? = null,
@@ -105,4 +106,17 @@ data class RefreshTokenResponse(
     @Json(name = "expires_in") val expiresIn: Int,
     @Json(name = "token_type") val tokenType: String,
     @Json(name = "user") val user: UsernameLoginUser
+)
+
+@JsonClass(generateAdapter = true)
+data class CreateConversationRequest(
+    @Json(name = "peer_id") val peerId: String
+)
+
+@JsonClass(generateAdapter = true)
+data class CreateConversationResponse(
+    @Json(name = "id") val id: String,
+    @Json(name = "member_a") val memberA: String,
+    @Json(name = "member_b") val memberB: String,
+    @Json(name = "created_at") val createdAt: String
 )

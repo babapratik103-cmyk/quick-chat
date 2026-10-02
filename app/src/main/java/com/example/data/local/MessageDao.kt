@@ -36,4 +36,28 @@ interface MessageDao {
 
     @Query("DELETE FROM messages")
     suspend fun clearAllMessages()
+
+    // Upsert message from realtime: if message exists and is outgoing, keep SENT status; otherwise update to DELIVERED
+    suspend fun upsertMessageFromRealtime(message: MessageEntity) {
+        val existing = getMessageById(message.id)
+        if (existing != null) {
+            if (existing.isOutgoing) {
+                // Message sent by us - keep existing status (SENT) and isOutgoing=true
+                if (existing.status != MessageDeliveryStatus.SENT) {
+                    val updated = existing.copy(status = MessageDeliveryStatus.SENT)
+                    updateMessage(updated)
+                }
+            } else {
+                // Incoming message - update to DELIVERED if not already
+                if (existing.status != MessageDeliveryStatus.DELIVERED) {
+                    val updated = existing.copy(status = MessageDeliveryStatus.DELIVERED)
+                    updateMessage(updated)
+                }
+            }
+        } else {
+            // New incoming message
+            val newMessage = message.copy(status = MessageDeliveryStatus.DELIVERED, isOutgoing = false)
+            insertMessage(newMessage)
+        }
+    }
 }

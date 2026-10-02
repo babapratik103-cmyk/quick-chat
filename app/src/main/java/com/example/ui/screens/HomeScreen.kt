@@ -313,7 +313,7 @@ fun HomeScreen(
                     items(conversations, key = { it.id }) { conv ->
                         ConversationListItem(
                             conversation = conv,
-                            onClick = { onNavigateToChat(conv.id) }
+                            onClick = { onNavigateToChat(conv.peerUser.id) }
                         )
                     }
                 }

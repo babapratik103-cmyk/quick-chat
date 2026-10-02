@@ -2,6 +2,7 @@ package com.example.data.repository
 
 import android.content.Context
 import android.database.sqlite.SQLiteConstraintException
+import android.util.Log
 import com.example.data.local.AppDatabase
 import com.example.data.local.AuthTokenStore
 import com.example.data.local.ConversationEntity
@@ -15,15 +16,13 @@ import com.example.data.model.User
 import com.example.data.remote.SupabaseRestService
 import com.example.data.remote.SupabaseConfig
 import com.example.data.remote.SupabaseProfileDto
+import com.example.data.remote.SupabaseMessageDto
 import com.example.data.remote.RefreshTokenResponse
-import kotlinx.coroutines.CoroutineScope
+import com.example.data.remote.CreateConversationResponse
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
 
@@ -36,8 +35,6 @@ class DefaultChatRepository(
     private val userDao = database.userDao()
     private val conversationDao = database.conversationDao()
     private val messageDao = database.messageDao()
-
-    private val scope = CoroutineScope(Dispatchers.IO + Job())
 
     override val currentUserFlow: Flow<User?> = userDao.getCurrentUserFlow().map { entity ->
         entity?.toDomainModel()
@@ -169,7 +166,7 @@ class DefaultChatRepository(
 
         // If not found locally, fetch from Supabase and create local cache
         if (user == null) {
-            val profile = supabaseRestService.getProfileById(authUserId)
+            val profile = supabaseRestService.getProfileById(authUserId, loginResponse.accessToken)
                 ?: return@withContext Result.failure(IllegalArgumentException("Failed to fetch user profile from server"))
 
             // Check/create Keystore key pair for this user
@@ -273,7 +270,7 @@ class DefaultChatRepository(
 
         // Get user profile
         val authUserId = refreshResponse.user.id
-        val profile = supabaseRestService.getProfileById(authUserId)
+        val profile = supabaseRestService.getProfileById(authUserId, refreshResponse.accessToken)
             ?: return@withContext Result.failure(IllegalArgumentException("Failed to fetch user profile"))
 
         // Check/create Keystore key pair
@@ -381,7 +378,7 @@ class DefaultChatRepository(
         conversationDao.getAllConversationsFlow().map { entities ->
             val result = mutableListOf<Conversation>()
             for (entity in entities) {
-                val peer = userDao.getUserById(entity.id)
+                val peer = userDao.getUserById(entity.peerId)
                 if (peer != null) {
                     result.add(
                         Conversation(
@@ -398,8 +395,8 @@ class DefaultChatRepository(
         }
 
     override suspend fun getConversation(peerId: String): Conversation? = withContext(Dispatchers.IO) {
-        val entity = conversationDao.getConversationById(peerId) ?: return@withContext null
-        val peer = userDao.getUserById(entity.id) ?: return@withContext null
+        val entity = conversationDao.getConversationByPeerId(peerId) ?: return@withContext null
+        val peer = userDao.getUserById(entity.peerId) ?: return@withContext null
         Conversation(
             id = entity.id,
             peerUser = peer.toDomainModel(),
@@ -410,10 +407,10 @@ class DefaultChatRepository(
     }
 
     override fun getConversationFlow(peerId: String): Flow<Conversation?> =
-        conversationDao.getConversationFlow(peerId).map { entity ->
+        conversationDao.getConversationFlowByPeerId(peerId).map { entity ->
             if (entity == null) null
             else {
-                val peer = userDao.getUserById(entity.id)
+                val peer = userDao.getUserById(entity.peerId)
                 peer?.let {
                     Conversation(
                         id = entity.id,
@@ -439,6 +436,7 @@ class DefaultChatRepository(
         recipientId: String,
         text: String
     ): Result<Message> = withContext(Dispatchers.IO) {
+        Log.d("QC_SEND", "sendMessage start: recipientId=$recipientId")
         val currentUser = userDao.getCurrentUser()
             ?: return@withContext Result.failure(IllegalStateException("Not authenticated"))
 
@@ -450,26 +448,70 @@ class DefaultChatRepository(
             return@withContext Result.failure(IllegalArgumentException("Message cannot be empty"))
         }
 
-        val messageId = "msg_${UUID.randomUUID().toString().take(10)}"
+        // Create or get conversation in Supabase
+        Log.d("QC_CONV", "sendMessage: calling createOrGetConversation")
+        val conversationResult = createOrGetConversation(recipientId)
+        if (conversationResult.isFailure) {
+            Log.e("QC_CONV", "sendMessage: createOrGetConversation failed: ${conversationResult.exceptionOrNull()}")
+            return@withContext conversationResult.map { it as Message }
+        }
+        val conversation = conversationResult.getOrThrow()
+        Log.d("QC_CONV", "sendMessage: conversationId=${conversation.id}")
+
+        // Get access token for Supabase RLS
+        val accessToken = AuthTokenStore.getAccessToken(context)
+            ?: return@withContext Result.failure(IllegalStateException("No access token available"))
+
         val now = System.currentTimeMillis()
 
+        // Send message to Supabase FIRST (server generates message ID)
+        val supabaseMessage = SupabaseMessageDto(
+            id = null, // Let server generate UUID
+            senderId = currentUser.id,
+            recipientId = recipientId,
+            conversationId = conversation.id,
+            ciphertext = trimmedText, // plaintext for now
+            iv = "",
+            mediaCiphertext = null,
+            createdAt = java.time.Instant.now().toString(),
+            expiresAt = java.time.Instant.now().plusSeconds(7 * 24 * 60 * 60).toString()
+        )
+
+        Log.d("QC_REST", "sendMessage: calling supabaseRestService.insertMessage")
+        val serverMessageId = supabaseRestService.insertMessage(supabaseMessage, accessToken)
+        Log.d("QC_REST", "sendMessage: insertMessage returned serverMessageId=${serverMessageId}")
+        if (serverMessageId == null || serverMessageId.isBlank()) {
+            Log.e("QC_REST", "sendMessage: insertMessage returned null/empty")
+            return@withContext Result.failure(IllegalStateException("Failed to send message to server: no message ID returned"))
+        }
+
+        // Server accepted message - now insert locally with SERVER message ID and SENT status
+        Log.d("QC_ROOM", "sendMessage: inserting MessageEntity to Room, id=$serverMessageId")
         val messageEntity = MessageEntity(
-            id = messageId,
-            conversationId = recipientId,
+            id = serverMessageId,
+            conversationId = conversation.id,
             senderId = currentUser.id,
             recipientId = recipientId,
             text = trimmedText,
             timestamp = now,
-            status = MessageDeliveryStatus.SENDING,
+            status = MessageDeliveryStatus.SENT,
             isOutgoing = true
         )
 
-        messageDao.insertMessage(messageEntity)
+        try {
+            messageDao.insertMessage(messageEntity)
+            Log.d("QC_ROOM", "sendMessage: messageDao.insertMessage succeeded")
+        } catch (e: Exception) {
+            Log.e("QC_ROOM", "sendMessage: messageDao.insertMessage FAILED: ${e.message}", e)
+            throw e
+        }
 
-        // Upsert conversation record
-        val existingConvo = conversationDao.getConversationById(recipientId)
+        // Upsert conversation record locally
+        Log.d("QC_CONV", "sendMessage: upserting ConversationEntity")
+        val existingConvo = conversationDao.getConversationById(conversation.id)
         val updatedConvo = ConversationEntity(
-            id = recipientId,
+            id = conversation.id,
+            peerId = recipientId,
             peerUsername = recipientUser.username,
             peerDisplayName = recipientUser.name,
             peerAvatarColorHex = recipientUser.avatarColorHex,
@@ -477,25 +519,97 @@ class DefaultChatRepository(
             lastMessageTimestamp = now,
             unreadCount = existingConvo?.unreadCount ?: 0
         )
-        conversationDao.insertOrUpdate(updatedConvo)
-
-        // Progress status: SENDING -> SENT -> DELIVERED -> READ
-        scope.launch {
-            delay(400)
-            messageDao.updateMessageStatus(messageId, MessageDeliveryStatus.SENT)
-            delay(500)
-            messageDao.updateMessageStatus(messageId, MessageDeliveryStatus.DELIVERED)
-            delay(600)
-            messageDao.updateMessageStatus(messageId, MessageDeliveryStatus.READ)
+        try {
+            conversationDao.insertOrUpdate(updatedConvo)
+            Log.d("QC_CONV", "sendMessage: conversationDao.insertOrUpdate succeeded")
+        } catch (e: Exception) {
+            Log.e("QC_CONV", "sendMessage: conversationDao.insertOrUpdate FAILED: ${e.message}", e)
+            throw e
         }
+
+        Log.d("QC_SEND", "Message $serverMessageId sent to server and saved locally with SENT status")
 
         Result.success(messageEntity.toDomainModel())
     }
 
-    override suspend fun startConversationWithUser(user: User): Conversation = withContext(Dispatchers.IO) {
-        val existing = conversationDao.getConversationById(user.id)
+    override suspend fun createOrGetConversation(peerId: String): Result<Conversation> = withContext(Dispatchers.IO) {
+        Log.d("QC_CONV", "createOrGetConversation: peerId=$peerId")
+        // Check local cache first
+        val existing = conversationDao.getConversationByPeerId(peerId)
         if (existing != null) {
-            Conversation(
+            Log.d("QC_CONV", "createOrGetConversation: found local conversation: ${existing.id}")
+            val peer = userDao.getUserById(existing.peerId)
+            return@withContext Result.success(Conversation(
+                id = existing.id,
+                peerUser = peer?.toDomainModel() ?: User(
+                    id = peerId,
+                    username = existing.peerUsername,
+                    name = existing.peerDisplayName,
+                    age = 0,
+                    email = "",
+                    avatarColorHex = existing.peerAvatarColorHex,
+                    createdAt = existing.lastMessageTimestamp
+                ),
+                lastMessageText = existing.lastMessageText,
+                lastMessageTimestamp = existing.lastMessageTimestamp,
+                unreadCount = existing.unreadCount
+            ))
+        }
+
+        Log.d("QC_CONV", "createOrGetConversation: no local conversation, creating in Supabase")
+        // Create conversation in Supabase
+        val accessToken = AuthTokenStore.getAccessToken(context)
+            ?: return@withContext Result.failure(IllegalStateException("No access token available"))
+        val conversationResponse = supabaseRestService.createConversation(peerId, accessToken)
+            ?: return@withContext Result.failure(IllegalArgumentException("Failed to create conversation in Supabase"))
+
+        Log.d("QC_CONV", "createOrGetConversation: Supabase created conversation: ${conversationResponse.id}")
+
+        // Get peer user info
+        val peerUser = userDao.getUserById(peerId)
+        val peer = peerUser?.toDomainModel() ?: User(
+            id = peerId,
+            username = "",
+            name = "",
+            age = 0,
+            email = "",
+            avatarColorHex = "#F59E0B",
+            createdAt = System.currentTimeMillis()
+        )
+
+        // Insert into local cache
+        val newConvo = ConversationEntity(
+            id = conversationResponse.id,
+            peerId = peerId,
+            peerUsername = peer.username,
+            peerDisplayName = peer.name,
+            peerAvatarColorHex = peer.avatarColorHex,
+            lastMessageText = "",
+            lastMessageTimestamp = System.currentTimeMillis(),
+            unreadCount = 0
+        )
+        Log.d("QC_CONV", "createOrGetConversation: inserting ConversationEntity to Room")
+        conversationDao.insertOrUpdate(newConvo)
+        Log.d("QC_CONV", "createOrGetConversation: conversationDao.insertOrUpdate succeeded")
+
+        Result.success(Conversation(
+            id = conversationResponse.id,
+            peerUser = peer,
+            lastMessageText = "",
+            lastMessageTimestamp = System.currentTimeMillis(),
+            unreadCount = 0
+        ))
+    }
+
+    override suspend fun startConversationWithUser(user: User): Conversation = withContext(Dispatchers.IO) {
+        val conversationResult = createOrGetConversation(user.id)
+        if (conversationResult.isSuccess) {
+            return@withContext conversationResult.getOrThrow()
+        }
+        // Fallback to local-only if Supabase fails
+        val existing = conversationDao.getConversationByPeerId(user.id)
+        if (existing != null) {
+            return@withContext Conversation(
                 id = existing.id,
                 peerUser = user,
                 lastMessageText = existing.lastMessageText,
@@ -504,7 +618,8 @@ class DefaultChatRepository(
             )
         } else {
             val newConvo = ConversationEntity(
-                id = user.id,
+                id = user.id, // Fallback: use peerId as conversation ID for local-only
+                peerId = user.id,
                 peerUsername = user.username,
                 peerDisplayName = user.name,
                 peerAvatarColorHex = user.avatarColorHex,
@@ -513,7 +628,7 @@ class DefaultChatRepository(
                 unreadCount = 0
             )
             conversationDao.insertOrUpdate(newConvo)
-            Conversation(
+            return@withContext Conversation(
                 id = user.id,
                 peerUser = user,
                 lastMessageText = newConvo.lastMessageText,
@@ -546,5 +661,26 @@ class DefaultChatRepository(
             status = this.status,
             isOutgoing = this.isOutgoing
         )
+    }
+
+    override suspend fun getCurrentAccessToken(): String? = withContext(Dispatchers.IO) {
+        AuthTokenStore.getAccessToken(context)
+    }
+
+    override suspend fun insertMessageFromRealtime(message: com.example.data.model.Message): Result<Unit> = withContext(Dispatchers.IO) {
+        Log.d("QC_RT", "insertMessageFromRealtime: id=${message.id}, conversationId=${message.conversationId}, senderId=${message.senderId}, isOutgoing=${message.isOutgoing}")
+        val messageEntity = MessageEntity(
+            id = message.id,
+            conversationId = message.conversationId,
+            senderId = message.senderId,
+            recipientId = message.recipientId,
+            text = message.text,
+            timestamp = message.timestamp,
+            status = message.status,
+            isOutgoing = message.isOutgoing
+        )
+        messageDao.upsertMessageFromRealtime(messageEntity)
+        Log.d("QC_RT", "Upserted realtime message: ${message.id}")
+        Result.success(Unit)
     }
 }

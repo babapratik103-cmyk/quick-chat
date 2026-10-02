@@ -12,11 +12,17 @@ interface ConversationDao {
     @Query("SELECT * FROM conversations ORDER BY lastMessageTimestamp DESC")
     fun getAllConversationsFlow(): Flow<List<ConversationEntity>>
 
-    @Query("SELECT * FROM conversations WHERE id = :id LIMIT 1")
-    suspend fun getConversationById(id: String): ConversationEntity?
+    @Query("SELECT * FROM conversations WHERE id = :conversationId LIMIT 1")
+    suspend fun getConversationById(conversationId: String): ConversationEntity?
 
-    @Query("SELECT * FROM conversations WHERE id = :id LIMIT 1")
-    fun getConversationFlow(id: String): Flow<ConversationEntity?>
+    @Query("SELECT * FROM conversations WHERE id = :conversationId LIMIT 1")
+    fun getConversationFlow(conversationId: String): Flow<ConversationEntity?>
+
+    @Query("SELECT * FROM conversations WHERE peerId = :peerId LIMIT 1")
+    suspend fun getConversationByPeerId(peerId: String): ConversationEntity?
+
+    @Query("SELECT * FROM conversations WHERE peerId = :peerId LIMIT 1")
+    fun getConversationFlowByPeerId(peerId: String): Flow<ConversationEntity?>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertOrUpdate(conversation: ConversationEntity)

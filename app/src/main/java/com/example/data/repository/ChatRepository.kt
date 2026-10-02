@@ -43,4 +43,13 @@ interface ChatRepository {
     fun getMessagesFlow(conversationId: String): Flow<List<Message>>
     suspend fun sendMessage(recipientId: String, text: String): Result<Message>
     suspend fun startConversationWithUser(user: User): Conversation
+
+    // Create or get 1-to-1 conversation with a user via Supabase
+    suspend fun createOrGetConversation(peerId: String): Result<Conversation>
+
+    // Get current access token for realtime auth
+    suspend fun getCurrentAccessToken(): String?
+
+    // Insert a message received via realtime
+    suspend fun insertMessageFromRealtime(message: com.example.data.model.Message): Result<Unit>
 }
